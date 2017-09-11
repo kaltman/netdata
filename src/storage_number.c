@@ -199,7 +199,7 @@ int print_calculated_number(char *str, calculated_number value) {
         *wstr++ = '.';
 
         // convert the fractional part to string (reversed)
-        char *fstre = print_number_llu_r_smart(fractional_str, (unsigned long long)llrintl(fractional));
+        char *fstre = print_number_llu_r_smart(fractional_str, (unsigned long long)calculated_number_llrint(fractional));
 
         // prepend zeros to reach 7 digits length
         int decimal = 7;
@@ -210,7 +210,7 @@ int print_calculated_number(char *str, calculated_number value) {
         }
 
         char *begin = fractional_str;
-        while(*begin == '0' && begin < fstre) begin++;
+        while(begin < fstre && *begin == '0') begin++;
 
         // copy reversed the fractional string
         fstre--;
