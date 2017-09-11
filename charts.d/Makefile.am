@@ -24,6 +24,7 @@ dist_charts_DATA = \
 	opensips.chart.sh \
 	phpfpm.chart.sh \
 	postfix.chart.sh \
+	resmon.chart.sh \
 	sensors.chart.sh \
 	squid.chart.sh \
 	tomcat.chart.sh \

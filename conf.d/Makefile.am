@@ -116,6 +116,7 @@ dist_chartsconfig_DATA = \
     charts.d/mysql.conf \
     charts.d/nut.conf \
     charts.d/phpfpm.conf \
+    charts.d/resmon.conf \
     charts.d/sensors.conf \
     charts.d/tomcat.conf \
     charts.d/ap.conf \
