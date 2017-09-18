@@ -8,6 +8,12 @@ int web_client_timeout = DEFAULT_DISCONNECT_IDLE_WEB_CLIENTS_AFTER_SECONDS;
 int respect_web_browser_do_not_track_policy = 0;
 char *web_x_frame_options = NULL;
 
+SIMPLE_PATTERN *web_allow_connections_from = NULL;
+SIMPLE_PATTERN *web_allow_registry_from = NULL;
+SIMPLE_PATTERN *web_allow_badges_from = NULL;
+SIMPLE_PATTERN *web_allow_streaming_from = NULL;
+SIMPLE_PATTERN *web_allow_netdataconf_from = NULL;
+
 #ifdef NETDATA_WITH_ZLIB
 int web_enable_gzip = 1, web_gzip_level = 3, web_gzip_strategy = Z_DEFAULT_STRATEGY;
 #endif /* NETDATA_WITH_ZLIB */
@@ -50,6 +56,18 @@ static inline int web_client_uncrock_socket(struct web_client *w) {
     return 0;
 }
 
+inline int web_client_permission_denied(struct web_client *w) {
+    w->response.data->contenttype = CT_TEXT_PLAIN;
+    buffer_flush(w->response.data);
+    buffer_strcat(w->response.data, "You do not allowed to access this resource.");
+    w->response.code = 403;
+    return 403;
+}
+
+static void log_connection(struct web_client *w, const char *msg) {
+    log_access("%llu: %d '[%s]:%s' '%s'", w->id, gettid(), w->client_ip, w->client_port, msg);
+}
+
 struct web_client *web_client_create(int listener) {
     struct web_client *w;
 
@@ -58,12 +76,25 @@ struct web_client *web_client_create(int listener) {
     w->mode = WEB_CLIENT_MODE_NORMAL;
 
     {
-        w->ifd = accept_socket(listener, SOCK_NONBLOCK, w->client_ip, sizeof(w->client_ip), w->client_port, sizeof(w->client_port));
+        w->ifd = accept_socket(listener, SOCK_NONBLOCK, w->client_ip, sizeof(w->client_ip), w->client_port, sizeof(w->client_port), web_allow_connections_from);
+
+        if(unlikely(!*w->client_ip))   strcpy(w->client_ip,   "-");
+        if(unlikely(!*w->client_port)) strcpy(w->client_port, "-");
+
         if (w->ifd == -1) {
-            error("%llu: Cannot accept new incoming connection.", w->id);
+            if(errno == EPERM)
+                log_connection(w, "ACCESS DENIED");
+            else {
+                log_connection(w, "CONNECTION FAILED");
+                error("%llu: Failed to accept new incoming connection.", w->id);
+            }
+
             freez(w);
             return NULL;
         }
+        else
+            log_connection(w, "CONNECTED");
+
         w->ofd = w->ifd;
 
         int flag = 1;
@@ -119,18 +150,45 @@ void web_client_reset(struct web_client *w) {
 
 
         // --------------------------------------------------------------------
-        // access log
 
-        log_access("%llu: (sent/all = %zu/%zu bytes %0.0f%%, prep/sent/total = %0.2f/%0.2f/%0.2f ms) %s: %d '%s'",
-                   w->id,
-                   sent, size, -((size > 0) ? ((size - sent) / (double) size * 100.0) : 0.0),
-                   dt_usec(&w->tv_ready, &w->tv_in) / 1000.0,
-                   dt_usec(&tv, &w->tv_ready) / 1000.0,
-                   dt_usec(&tv, &w->tv_in) / 1000.0,
-                   (w->mode == WEB_CLIENT_MODE_FILECOPY) ? "filecopy" : ((w->mode == WEB_CLIENT_MODE_OPTIONS)
-                                                                         ? "options" : "data"),
-                   w->response.code,
-                   w->last_url
+        const char *mode;
+        switch(w->mode) {
+            case WEB_CLIENT_MODE_FILECOPY:
+                mode = "FILECOPY";
+                break;
+
+            case WEB_CLIENT_MODE_OPTIONS:
+                mode = "OPTIONS";
+                break;
+
+            case WEB_CLIENT_MODE_STREAM:
+                mode = "STREAM";
+                break;
+
+            case WEB_CLIENT_MODE_NORMAL:
+                mode = "DATA";
+                break;
+
+            default:
+                mode = "UNKNOWN";
+                break;
+        }
+
+        // access log
+        log_access("%llu: %d '[%s]:%s' '%s' (sent/all = %zu/%zu bytes %0.0f%%, prep/sent/total = %0.2f/%0.2f/%0.2f ms) %d '%s'",
+                   w->id
+                   , gettid()
+                   , w->client_ip
+                   , w->client_port
+                   , mode
+                   , sent
+                   , size
+                   , -((size > 0) ? ((size - sent) / (double) size * 100.0) : 0.0)
+                   , dt_usec(&w->tv_ready, &w->tv_in) / 1000.0
+                   , dt_usec(&tv, &w->tv_ready) / 1000.0
+                   , dt_usec(&tv, &w->tv_in) / 1000.0
+                   , w->response.code
+                   , w->last_url
         );
     }
 
@@ -1101,6 +1159,9 @@ static inline int web_client_process_url(RRDHOST *host, struct web_client *w, ch
             return check_host_and_call(host, w, url, web_client_api_old_all_json);
         }
         else if(unlikely(hash == hash_netdata_conf && strcmp(tok, "netdata.conf") == 0)) {    // netdata.conf
+            if(unlikely(web_allow_netdataconf_from && !simple_pattern_matches(web_allow_netdataconf_from, w->client_ip)))
+                return web_client_permission_denied(w);
+
             debug(D_WEB_CLIENT_ACCESS, "%llu: generating netdata.conf ...", w->id);
             w->response.data->contenttype = CT_TEXT_PLAIN;
             buffer_flush(w->response.data);
@@ -1189,6 +1250,11 @@ void web_client_process_request(struct web_client *w) {
         case HTTP_VALIDATION_OK:
             switch(w->mode) {
                 case WEB_CLIENT_MODE_STREAM:
+                    if(unlikely(web_allow_streaming_from && !simple_pattern_matches(web_allow_streaming_from, w->client_ip))) {
+                        web_client_permission_denied(w);
+                        return;
+                    }
+
                     w->response.code = rrdpush_receiver_thread_spawn(localhost, w, w->decoded_url);
                     return;
 
@@ -1607,8 +1673,6 @@ void *web_client_main(void *ptr)
     int retval, timeout;
     nfds_t fdmax = 0;
 
-    log_access("%llu: %s port %s connected on thread task id %d", w->id, w->client_ip, w->client_port, gettid());
-
     for(;;) {
         if(unlikely(netdata_exit)) break;
 
@@ -1716,9 +1780,11 @@ void *web_client_main(void *ptr)
         }
     }
 
+    if(w->mode != WEB_CLIENT_MODE_STREAM)
+        log_connection(w, "DISCONNECTED");
+
     web_client_reset(w);
 
-    log_access("%llu: %s port %s disconnected from thread task id %d", w->id, w->client_ip, w->client_port, gettid());
     debug(D_WEB_CLIENT, "%llu: done...", w->id);
 
     // close the sockets/files now

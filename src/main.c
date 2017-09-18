@@ -83,6 +83,12 @@ void web_server_config_options(void) {
     web_x_frame_options = config_get(CONFIG_SECTION_WEB, "x-frame-options response header", "");
     if(!*web_x_frame_options) web_x_frame_options = NULL;
 
+    web_allow_connections_from = simple_pattern_create(config_get(CONFIG_SECTION_WEB, "allow connections from", "127.* ::1 *"), SIMPLE_PATTERN_EXACT);
+    web_allow_badges_from = simple_pattern_create(config_get(CONFIG_SECTION_WEB, "allow badges from", "*"), SIMPLE_PATTERN_EXACT);
+    web_allow_registry_from = simple_pattern_create(config_get(CONFIG_SECTION_REGISTRY, "allow from", "*"), SIMPLE_PATTERN_EXACT);
+    web_allow_streaming_from = simple_pattern_create(config_get(CONFIG_SECTION_WEB, "allow streaming from", "*"), SIMPLE_PATTERN_EXACT);
+    web_allow_netdataconf_from = simple_pattern_create(config_get(CONFIG_SECTION_WEB, "allow netdata.conf from", "::1 fd* 127.* 10.* 192.168.* 172.16.* 172.17.* 172.18.* 172.19.* 172.20.* 172.21.* 172.22.* 172.23.* 172.24.* 172.25.* 172.26.* 172.27.* 172.28.* 172.29.* 172.30.* 172.31.*"), SIMPLE_PATTERN_EXACT);
+
 #ifdef NETDATA_WITH_ZLIB
     web_enable_gzip = config_get_boolean(CONFIG_SECTION_WEB, "enable gzip compression", web_enable_gzip);
 
@@ -237,7 +243,7 @@ struct option_def options[] = {
     { 'W', "See Advanced options below.",                 "options",     NULL},
 };
 
-void help(int exitcode) {
+int help(int exitcode) {
     FILE *stream;
     if(exitcode == 0)
         stream = stdout;
@@ -316,7 +322,7 @@ void help(int exitcode) {
     );
 
     fflush(stream);
-    exit(exitcode);
+    return exitcode;
 }
 
 // TODO: Remove this function with the nix major release.
@@ -593,7 +599,7 @@ int main(int argc, char **argv) {
                 case 'c':
                     if(config_load(optarg, 1) != 1) {
                         error("Cannot load configuration file %s.", optarg);
-                        exit(1);
+                        return 1;
                     }
                     else {
                         debug(D_OPTIONS, "Configuration loaded from %s.", optarg);
@@ -604,7 +610,7 @@ int main(int argc, char **argv) {
                     dont_fork = 1;
                     break;
                 case 'h':
-                    help(0);
+                    return help(0);
                     break;
                 case 'i':
                     config_set(CONFIG_SECTION_WEB, "bind to", optarg);
@@ -635,8 +641,8 @@ int main(int argc, char **argv) {
                         char* debug_flags_string = "debug_flags=";
 
                         if(strcmp(optarg, "unittest") == 0) {
-                            if(unit_test_buffer()) exit(1);
-                            if(unit_test_str2ld()) exit(1);
+                            if(unit_test_buffer()) return 1;
+                            if(unit_test_str2ld()) return 1;
                             //default_rrd_update_every = 1;
                             //default_rrd_memory_mode = RRD_MEMORY_MODE_RAM;
                             //if(!config_loaded) config_load(NULL, 0);
@@ -646,10 +652,10 @@ int main(int argc, char **argv) {
                             default_health_enabled = 0;
                             rrd_init("unittest");
                             default_rrdpush_enabled = 0;
-                            if(run_all_mockup_tests()) exit(1);
-                            if(unit_test_storage()) exit(1);
+                            if(run_all_mockup_tests()) return 1;
+                            if(unit_test_storage()) return 1;
                             fprintf(stderr, "\n\nALL TESTS PASSED\n\n");
-                            exit(0);
+                            return 0;
                         }
                         else if(strcmp(optarg, "simple-pattern") == 0) {
                             if(optind + 2 > argc) {
@@ -673,7 +679,7 @@ int main(int argc, char **argv) {
                                         "   -W simple-pattern '!/path/*/*.ext /path/*.ext' '/path/test.ext'\n"
                                         "\n"
                                 );
-                                exit(1);
+                                return 1;
                             }
 
                             const char *heystack = argv[optind];
@@ -686,11 +692,11 @@ int main(int argc, char **argv) {
 
                             if(ret) {
                                 fprintf(stdout, "RESULT: MATCHED - pattern '%s' matches '%s'\n", heystack, needle);
-                                exit(0);
+                                return 0;
                             }
                             else {
                                 fprintf(stdout, "RESULT: NOT MATCHED - pattern '%s' does not match '%s'\n", heystack, needle);
-                                exit(1);
+                                return 1;
                             }
                         }
                         else if(strncmp(optarg, stacksize_string, strlen(stacksize_string)) == 0) {
@@ -716,7 +722,7 @@ int main(int argc, char **argv) {
                                         " parameters."
                                         "\n"
                                 );
-                                exit(1);
+                                return 1;
                             }
                             const char *section = argv[optind];
                             const char *key = argv[optind + 1];
@@ -741,7 +747,7 @@ int main(int argc, char **argv) {
                                         " -c netdata.conf has to be given before -W get.\n"
                                         "\n"
                                 );
-                                exit(1);
+                                return 1;
                             }
 
                             if(!config_loaded) {
@@ -757,18 +763,18 @@ int main(int argc, char **argv) {
                             const char *def = argv[optind + 2];
                             const char *value = config_get(section, key, def);
                             printf("%s\n", value);
-                            exit(0);
+                            return 0;
                         }
                         else {
                             fprintf(stderr, "Unknown -W parameter '%s'\n", optarg);
-                            help(1);
+                            return help(1);
                         }
                     }
                     break;
+
                 default: /* ? */
                     fprintf(stderr, "Unknown parameter '%c'\n", opt);
-                    help(1);
-                    break;
+                    return help(1);
             }
         }
     }
@@ -855,47 +861,10 @@ int main(int argc, char **argv) {
 
         // block signals while initializing threads.
         // this causes the threads to block signals.
-        sigset_t sigset;
-        sigfillset(&sigset);
-        if(pthread_sigmask(SIG_BLOCK, &sigset, NULL) == -1)
-            error("Could not block signals for threads");
+        signals_block();
 
-        // Catch signals which we want to use
-        struct sigaction sa;
-        sa.sa_flags = 0;
-
-        // ingore all signals while we run in a signal handler
-        sigfillset(&sa.sa_mask);
-
-        // INFO: If we add signals here we have to unblock them
-        // at popen.c when running a external plugin.
-
-        // Ignore SIGPIPE completely.
-        sa.sa_handler = SIG_IGN;
-        if(sigaction(SIGPIPE, &sa, NULL) == -1)
-            error("Failed to change signal handler for SIGPIPE");
-
-        sa.sa_handler = sig_handler_exit;
-        if(sigaction(SIGINT, &sa, NULL) == -1)
-            error("Failed to change signal handler for SIGINT");
-
-        sa.sa_handler = sig_handler_exit;
-        if(sigaction(SIGTERM, &sa, NULL) == -1)
-            error("Failed to change signal handler for SIGTERM");
-
-        sa.sa_handler = sig_handler_logrotate;
-        if(sigaction(SIGHUP, &sa, NULL) == -1)
-            error("Failed to change signal handler for SIGHUP");
-
-        // save database on SIGUSR1
-        sa.sa_handler = sig_handler_save;
-        if(sigaction(SIGUSR1, &sa, NULL) == -1)
-            error("Failed to change signal handler for SIGUSR1");
-
-        // reload health configuration on SIGUSR2
-        sa.sa_handler = sig_handler_reload_health;
-        if(sigaction(SIGUSR2, &sa, NULL) == -1)
-            error("Failed to change signal handler for SIGUSR2");
+        // setup the signals we want to use
+        signals_init();
 
 
         // --------------------------------------------------------------------
@@ -1026,21 +995,16 @@ int main(int argc, char **argv) {
 
 
     // ------------------------------------------------------------------------
-    // block signals while initializing threads.
-    sigset_t sigset;
-    sigfillset(&sigset);
+    // unblock signals
 
-    if(pthread_sigmask(SIG_UNBLOCK, &sigset, NULL) == -1) {
-        error("Could not unblock signals for threads");
-    }
+    signals_unblock();
 
-    // Handle flags set in the signal handler.
-    while(1) {
-        pause();
-        if(netdata_exit) {
-            debug(D_EXIT, "Exit main loop of netdata.");
-            netdata_cleanup_and_exit(0);
-            exit(0);
-        }
-    }
+    // ------------------------------------------------------------------------
+    // Handle signals
+
+    signals_handle();
+
+    // should never reach this point
+    // but we need it for rpmlint #2752
+    return 1;
 }
